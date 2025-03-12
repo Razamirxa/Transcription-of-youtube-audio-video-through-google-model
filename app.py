@@ -17,7 +17,12 @@ import google.auth.transport.requests
 import requests
 from googleapiclient.discovery import build
 from google.cloud import speech
-from google.cloud import translate_v2 as translate
+try:
+    # Try the newer way first
+    from google.cloud import translate_v2 as translate
+except ImportError:
+    # Fall back to the direct import if the v2 module isn't available
+    from google.cloud import translate
 import yt_dlp
 
 # Set Google Cloud credentials
@@ -146,10 +151,19 @@ def translate_text(text, target_language="en"):
         translate_client = translate.Client()
         
         # Perform the translation
-        result = translate_client.translate(text, target_language=target_language)
-        
-        # Return the translated text
-        return result["translatedText"]
+        try:
+            # For translate_v2
+            result = translate_client.translate(text, target_language=target_language)
+            return result["translatedText"]
+        except (TypeError, KeyError):
+            # For newer translate versions
+            result = translate_client.translate(text, target_language=target_language)
+            if isinstance(result, dict) and "translatedText" in result:
+                return result["translatedText"]
+            elif hasattr(result, "translated_text"):
+                return result.translated_text
+            else:
+                return str(result)
         
     except Exception as e:
         print(f"Error translating text: {str(e)}")
