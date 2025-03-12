@@ -1,8 +1,6 @@
 import os
 import tempfile
 from pathlib import Path
-import streamlit as st
-from google.cloud import speech
 import ffmpeg
 from pydub import AudioSegment
 import sounddevice as sd
@@ -18,6 +16,7 @@ import google.auth
 import google.auth.transport.requests
 import requests
 from googleapiclient.discovery import build
+from google.cloud import speech
 from google.cloud import translate_v2 as translate
 import yt_dlp
 
@@ -107,7 +106,7 @@ class AudioRecorder:
 def save_audio_to_wav(audio_data, sample_rate):
     """Save recorded audio to WAV file."""
     if len(audio_data) == 0:
-        st.error("No audio data recorded!")
+        print("No audio data recorded!")
         return None
         
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -130,7 +129,7 @@ def convert_video_to_audio(video_path):
         ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
         return audio_path
     except ffmpeg.Error as e:
-        st.error(f"FFmpeg error: {e.stderr.decode()}")
+        print(f"FFmpeg error: {e.stderr.decode()}")
         raise
 
 def convert_audio_to_wav(audio_path):
@@ -153,16 +152,21 @@ def translate_text(text, target_language="en"):
         return result["translatedText"]
         
     except Exception as e:
-        st.error(f"Error translating text: {str(e)}")
+        print(f"Error translating text: {str(e)}")
         return text  # Return original text if translation fails
 
-def transcribe_audio(audio_path, language_code="en-US", translate_to_english=True):
-    """Transcribe audio and optionally translate to English."""
-    client = speech.SpeechClient()
+def transcribe_audio(audio_path, language_code="en-US", translate_to_english=True, progress_callback=None):
+    """
+    Transcribe audio and optionally translate to English.
     
-    # Create a progress indicator
-    progress_placeholder = st.empty()
-    progress_placeholder.text("Preparing audio for transcription...")
+    Args:
+        audio_path: Path to the audio file
+        language_code: Language code for transcription
+        translate_to_english: Whether to translate to English
+        progress_callback: Function to call with progress updates
+          This should accept (message, progress_value) parameters
+    """
+    client = speech.SpeechClient()
     
     try:
         # Load the audio file
@@ -175,11 +179,11 @@ def transcribe_audio(audio_path, language_code="en-US", translate_to_english=Tru
         chunk_length_ms = 45 * 1000  # 45 seconds
         chunks = [audio_segment[i:i + chunk_length_ms] for i in range(0, len(audio_segment), chunk_length_ms)]
         
-        progress_placeholder.text(f"Audio split into {len(chunks)} chunks for processing.")
+        if progress_callback:
+            progress_callback(f"Audio split into {len(chunks)} chunks for processing.", 0)
         
         # Process each chunk and combine transcriptions
         transcript = ""
-        progress_bar = st.progress(0)
         
         for i, chunk in enumerate(chunks):
             # Export chunk to temporary file
@@ -208,9 +212,9 @@ def transcribe_audio(audio_path, language_code="en-US", translate_to_english=Tru
                     transcript += result.alternatives[0].transcript + " "
                 
                 # Update progress
-                progress = (i + 1) / len(chunks)
-                progress_bar.progress(progress)
-                progress_placeholder.text(f"Processing chunk {i+1} of {len(chunks)} ({int(progress*100)}% complete)")
+                if progress_callback:
+                    progress = (i + 1) / len(chunks)
+                    progress_callback(f"Processing chunk {i+1} of {len(chunks)} ({int(progress*100)}% complete)", progress)
                 
             finally:
                 # Clean up temporary file
@@ -223,29 +227,21 @@ def transcribe_audio(audio_path, language_code="en-US", translate_to_english=Tru
         
         # Check if we need to translate
         if translate_to_english and not language_code.startswith("en"):
-            progress_placeholder.text("Transcription complete. Translating to English...")
+            if progress_callback:
+                progress_callback("Transcription complete. Translating to English...", 0.9)
             translated_transcript = translate_text(transcript)
-            progress_placeholder.empty()
-            progress_bar.empty()
             return {
                 "original_transcript": transcript,
                 "translated_transcript": translated_transcript
             }
         else:
-            progress_placeholder.empty()
-            progress_bar.empty()
             return {
                 "original_transcript": transcript, 
                 "translated_transcript": transcript
             }
         
     except Exception as e:
-        st.error(f"Error transcribing audio: {str(e)}")
-        progress_placeholder.empty()
-        try:
-            progress_bar.empty()
-        except:
-            pass
+        print(f"Error transcribing audio: {str(e)}")
         raise e
 
 def detect_language(text):
@@ -257,6 +253,7 @@ def detect_language(text):
         return "en-US"
 
 def download_audio_from_youtube(youtube_url):
+    """Download audio from a YouTube video"""
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -269,155 +266,4 @@ def download_audio_from_youtube(youtube_url):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info_dict = ydl.extract_info(youtube_url, download=True)
         audio_file_path = ydl.prepare_filename(info_dict)
-        return audio_file_path.replace('.webm', '.wav')  # Adjust extension if needed
-
-def main():
-    st.title("Audio Transcription App")
-    
-    # No more tabs, only microphone recording
-    st.write("Record audio from your microphone, upload a file, or enter a YouTube URL")
-    
-    # Initialize session state for recorder
-    if 'recorder' not in st.session_state:
-        st.session_state.recorder = AudioRecorder()
-    if 'recording' not in st.session_state:
-        st.session_state.recording = False
-    if 'audio_data' not in st.session_state:
-        st.session_state.audio_data = None
-
-    # Language selection for recording
-    record_language_options = [URDU_LANGUAGE] + [f"{code} - {name}" for code, name in LANGUAGES.items() if code != "ur"]
-    record_language = st.selectbox(
-        "Select language for recording",
-        record_language_options,
-        key="record_language"
-    )
-    
-    # Add option to enable/disable translation
-    translate_to_english = st.checkbox("Translate to English (if not in English)", value=True)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("Start Recording", disabled=st.session_state.recording):
-            st.session_state.recorder.start_recording()
-            st.session_state.recording = True
-            st.session_state.audio_data = None
-    
-    with col2:
-        if st.button("Stop Recording", disabled=not st.session_state.recording):
-            audio_data = st.session_state.recorder.stop_recording()
-            st.session_state.recording = False
-            st.session_state.audio_data = audio_data
-
-    if st.session_state.recording:
-        st.markdown("🔴 **Recording in progress...**")
-    
-    # File uploader for audio/video files
-    uploaded_file = st.file_uploader("Upload an audio or video file", type=["wav", "mp3", "mp4", "m4a", "flac", "ogg", "webm"])
-    
-    # YouTube URL input
-    youtube_url = st.text_input("Enter YouTube video URL")
-    
-    # Process the YouTube URL
-    if youtube_url:
-        try:
-            # Download the audio from YouTube
-            audio_file_path = download_audio_from_youtube(youtube_url)
-            
-            # Convert to WAV if necessary
-            audio_path = convert_audio_to_wav(audio_file_path)
-            
-            # Display audio player
-            st.audio(audio_path)
-            
-            # Get language code
-            language_code = record_language.split(" - ")[0]
-            
-            # Transcribe the audio
-            with st.spinner("Transcribing and translating..."):
-                transcript_result = transcribe_audio(audio_path, language_code, translate_to_english)
-                
-                # Display the original transcript
-                st.subheader(f"Original Transcript ({record_language.split(' - ')[1]}):")
-                st.write(transcript_result["original_transcript"])
-                
-                # If translation is different from original, display it
-                if translate_to_english and transcript_result["original_transcript"] != transcript_result["translated_transcript"]:
-                    st.subheader("English Translation:")
-                    st.write(transcript_result["translated_transcript"])
-        except Exception as e:
-            st.error(f"An error occurred while processing the YouTube video: {str(e)}")
-    
-    # Process the uploaded file
-    if uploaded_file is not None:
-        file_path = Path(tempfile.gettempdir()) / uploaded_file.name
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        
-        # Convert to WAV if necessary
-        if file_path.suffix.lower() in [".mp4", ".m4a", ".webm"]:
-            audio_path = convert_video_to_audio(file_path)
-        else:
-            audio_path = convert_audio_to_wav(file_path)
-        
-        # Display audio player
-        st.audio(audio_path)
-        
-        # Get language code
-        language_code = record_language.split(" - ")[0]
-        
-        # Transcribe the audio
-        with st.spinner("Transcribing and translating..."):
-            transcript_result = transcribe_audio(audio_path, language_code, translate_to_english)
-            
-            # Display the original transcript
-            st.subheader(f"Original Transcript ({record_language.split(' - ')[1]}):")
-            st.write(transcript_result["original_transcript"])
-            
-            # If translation is different from original, display it
-            if translate_to_english and transcript_result["original_transcript"] != transcript_result["translated_transcript"]:
-                st.subheader("English Translation:")
-                st.write(transcript_result["translated_transcript"])
-    
-    # Process the recorded audio
-    if st.session_state.audio_data is not None:
-        audio_path = None
-        try:
-            # Save to WAV file
-            audio_path = save_audio_to_wav(st.session_state.audio_data, st.session_state.recorder.sample_rate)
-            
-            if audio_path:
-                # Display audio player
-                st.audio(audio_path)
-                
-                # Get language code
-                language_code = record_language.split(" - ")[0]
-                
-                # Transcribe the audio
-                with st.spinner("Transcribing and translating..."):
-                    transcript_result = transcribe_audio(audio_path, language_code, translate_to_english)
-                    
-                    # Display the original transcript
-                    st.subheader(f"Original Transcript ({record_language.split(' - ')[1]}):")
-                    st.write(transcript_result["original_transcript"])
-                    
-                    # If translation is different from original, display it
-                    if translate_to_english and transcript_result["original_transcript"] != transcript_result["translated_transcript"]:
-                        st.subheader("English Translation:")
-                        st.write(transcript_result["translated_transcript"])
-        
-        except Exception as e:
-            st.error(f"An error occurred: {str(e)}")
-        
-        finally:
-            # Clean up the audio file
-            try:
-                if audio_path and os.path.exists(audio_path):
-                    os.unlink(audio_path)
-            except Exception as e:
-                print(f"Warning: Could not delete temporary file {audio_path}: {e}")
-            st.session_state.audio_data = None
-
-if __name__ == "__main__":
-    main() 
+        return audio_file_path.replace('.webm', '.wav')  # Adjust extension if needed 
