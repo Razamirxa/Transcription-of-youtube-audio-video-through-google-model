@@ -10,3 +10,5 @@ yt-dlp
 langdetect
 requests
 google-api-python-client
+ffmpeg
+portaudio19-dev
